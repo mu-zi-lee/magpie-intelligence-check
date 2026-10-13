@@ -48,7 +48,7 @@ func TestModelTraceBatchBudgetAndGateIsolation(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	state, _ := s.Snapshot()
-	if calls.Load() != 3 || state.Targets["a/solo"].State != "review" {
+	if calls.Load() != 3 || !state.Targets["a/solo"].Held {
 		t.Fatal("changed gate or wrong call count")
 	}
 	seen := map[int]bool{}

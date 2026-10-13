@@ -60,6 +60,7 @@ func run(dir, gate, addr, binary string, owned bool) error {
 	}
 	defer s.Close()
 	s.WatchLog()
+	s.WatchTargets()
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err

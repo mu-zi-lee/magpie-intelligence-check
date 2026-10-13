@@ -12,11 +12,27 @@ if(!magpie)throw Error('Set MAGPIE_BINARY to an existing Magpie executable');
 const dir=await fs.mkdtemp(path.join(os.tmpdir(),'quality-magpie-'));
 const children=[];
 let calls=0;
+let probeAnswer='46.24 inches';
+let probeStatus=200;
+let releaseProbe;
+const probeReady=new Promise(resolve=>{releaseProbe=resolve;});
 const upstream=http.createServer(async(req,res)=>{
  let raw='';for await(const chunk of req)raw+=chunk;
  const body=JSON.parse(raw);calls++;
- const answer=body.messages?.at(-1)?.content?.startsWith('A previously isolated')?'46.24 inches':'business reply';
- res.setHeader('content-type','application/json');res.end(JSON.stringify({id:'fixture',model:'solo',choices:[{message:{role:'assistant',content:answer},finish_reason:'stop'}],usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2}}));
+ const probe=body.messages?.at(-1)?.content?.startsWith('A previously isolated');
+ if(probe){await probeReady;}
+ const answer=probe?probeAnswer:'business reply';
+ res.statusCode=probe?probeStatus:200;
+ if(body.stream&&res.statusCode===200){
+  res.setHeader('content-type','text/event-stream');
+  for(const chunk of [
+   {id:'fixture',model:'solo',choices:[{index:0,delta:{role:'assistant',content:answer},finish_reason:null}]},
+   {id:'fixture',model:'solo',choices:[{index:0,delta:{},finish_reason:'stop'}],usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2}},
+  ]){res.write('data: '+JSON.stringify(chunk)+'\n\n');}
+  res.end('data: [DONE]\n\n');
+ }else{
+  res.setHeader('content-type','application/json');res.end(JSON.stringify({id:'fixture',model:'solo',choices:[{message:{role:'assistant',content:answer},finish_reason:'stop'}],usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2}}));
+ }
 });
 await new Promise(r=>upstream.listen(0,'127.0.0.1',r));
 const port=upstream.address().port;
@@ -37,26 +53,57 @@ try{
  let output='';const ready=new Promise((resolve,reject)=>{qc.stdout.on('data',b=>{output+=b;const i=output.indexOf('\n');if(i>=0)resolve(JSON.parse(output.slice(0,i)))});qc.once('error',reject)});
  const info=await ready;
  const api=async(p,body)=>{const r=await fetch(info.origin+p,{method:body?'POST':'GET',headers:{authorization:'Bearer '+info.control,'content-type':'application/json'},body:body?JSON.stringify(body):undefined});if(!r.ok)throw Error(await r.text());return r.json()};
- await api('/api/config',{gateway_url:gateway,gateway_key:'magpie',log_path:log,daily_limit:120});
+ await api('/api/config',{gateway_url:gateway,gateway_key:'magpie',log_path:'',daily_limit:120});
  await api('/api/target',{model:'fixture/solo',enabled:true});
  await new Promise(r=>setTimeout(r,1500));
  const call=async model=>fetch(gateway+'/v1/chat/completions',{method:'POST',headers:{authorization:'Bearer magpie','content-type':'application/json'},body:JSON.stringify({model,messages:[{role:'user',content:'business'}],max_tokens:100})});
- let response=await call('fixture/solo');assert.equal(response.status,403);assert.equal(calls,0,'blocked business reached upstream');
+ let response=await call('fixture/solo');assert.equal(response.status,200);
+ assert.equal((await response.json()).choices[0].message.content,'business reply','unchecked business request did not reach upstream');
+ await waitFor(async()=>{const v=await api('/api/state');return v.state.results.some(r=>r.verdict==='running');});
+ releaseProbe();
  try{await waitFor(async()=>{const v=await api('/api/state');return v.state.targets['fixture/solo'].state==='passed'});}catch(e){console.error(JSON.stringify(await api('/api/state')));console.error(await fs.readFile(log,'utf8'));throw e}
  await new Promise(r=>setTimeout(r,1200));response=await call('fixture/solo');assert.equal(response.status,200,await response.text());
- await api('/api/action',{model:'fixture/solo',action:'hold'});await new Promise(r=>setTimeout(r,1200));response=await call('fixture/solo');assert.equal(response.status,403);
- for(const [endpoint,body] of [
+ const protocols=[
+  ['/v1/chat/completions',{model:'fixture/solo',messages:[{role:'user',content:'business'}],max_tokens:100}],
   ['/v1/messages',{model:'fixture/solo',max_tokens:100,messages:[{role:'user',content:'business'}]}],
   ['/v1/responses',{model:'fixture/solo',input:'business'}],
- ]){
-  const before=calls;
-  const blocked=await fetch(gateway+endpoint,{method:'POST',headers:{authorization:'Bearer magpie','x-api-key':'magpie','anthropic-version':'2023-06-01','content-type':'application/json'},body:JSON.stringify(body)});
-  assert.equal(blocked.status,403,endpoint);
-  const error=await blocked.json();assert.equal(error.error.type,'permission_error');assert.match(error.error.message,/MAGPIE_QUALITY_REVIEW_REQUIRED/);assert.equal(calls,before);
+ ];
+ async function verifyProtocols(blocked){
+  for(const [endpoint,body] of protocols){
+   const before=calls;
+   const response=await fetch(gateway+endpoint,{method:'POST',headers:{authorization:'Bearer magpie','x-api-key':'magpie','anthropic-version':'2023-06-01','content-type':'application/json'},body:JSON.stringify(body)});
+   assert.equal(response.status,blocked?403:200,endpoint+': '+(response.ok?'':await response.clone().text()));
+   const result=await response.json();
+   if(blocked){
+    assert.equal(result.error.type,'permission_error');assert.match(result.error.message,/MAGPIE_QUALITY_REVIEW_REQUIRED/);assert.equal(calls,before);
+   }else{
+    const text=endpoint.endsWith('/messages')?result.content[0].text:endpoint.endsWith('/responses')?result.output.find(item=>item.type==='message').content[0].text:result.choices[0].message.content;
+    assert.equal(text,'business reply',endpoint);assert.equal(calls,before+1,'business request was lost or duplicated');
+   }
+  }
  }
+ probeAnswer='48 inches';
+ await api('/api/action',{model:'fixture/solo',action:'test'});
+ await waitFor(async()=>{const v=await api('/api/state');return v.state.targets['fixture/solo'].verdict==='review';});
+ await new Promise(r=>setTimeout(r,1200));await verifyProtocols(false);
+ await api('/api/action',{model:'fixture/solo',action:'strict'});
+ await new Promise(r=>setTimeout(r,1200));await verifyProtocols(true);
+ probeStatus=503;
+ await api('/api/action',{model:'fixture/solo',action:'test'});
+ await waitFor(async()=>{const v=await api('/api/state');return v.state.targets['fixture/solo'].state==='unavailable';});
+ await new Promise(r=>setTimeout(r,1200));await verifyProtocols(true);
+ await api('/api/action',{model:'fixture/solo',action:'monitor'});
+ await new Promise(r=>setTimeout(r,1200));await verifyProtocols(false);
+ await api('/api/action',{model:'fixture/solo',action:'hold'});
+ await new Promise(r=>setTimeout(r,1200));await verifyProtocols(true);
+ await api('/api/action',{model:'fixture/solo',action:'resume'});
+ await new Promise(r=>setTimeout(r,1200));await verifyProtocols(false);
+ const stopped=once(qc,'exit');qc.stdin.end();await stopped;
+ await verifyProtocols(false);
  response=await call('fixture/luna');assert.equal(response.status,200);
- console.log('PASS: real Magpie blocks before upstream, probes through alias, releases after pass, preserves manual hold, leaves Luna available');
+ console.log('PASS: real Magpie forwards all three APIs in monitor mode, probes without a log, preserves explicit strict/held blocks and forwards with the detector stopped');
 }finally{
+ releaseProbe();
  for(const p of children){p.stdin.end();p.kill('SIGTERM')}
  await Promise.all(children.map(async p=>{if(p.exitCode===null)await Promise.race([once(p,'exit'),new Promise(r=>setTimeout(r,3000))]);if(p.exitCode===null)p.kill('SIGKILL')}));
  upstream.close();await fs.rm(dir,{recursive:true,force:true});

@@ -27,7 +27,7 @@ func TestRestartRestoresProtection(t *testing.T) {
 	}
 	defer restored.Close()
 	state, _ := restored.Snapshot()
-	if state.Targets["a/solo"].State != "review" || !state.Targets["a/solo"].Enabled {
+	if !state.Targets["a/solo"].Held || !state.Targets["a/solo"].Enabled {
 		t.Fatal("restart removed protection")
 	}
 }

@@ -161,7 +161,7 @@ function dayCount(model) {
   const cleared = data.state.cleared_usage?.[day] || {};
   return data.state.results.filter(r => (!model || r.model === model) && new Date(r.time).toISOString().slice(0, 10) === day).length + (model ? cleared[model] || 0 : Object.values(cleared).reduce((a, b) => a + b, 0));
 }
-function validPass(target) { return target.enabled && target.state === 'passed' && Date.now() - Date.parse(target.checked_at) < 900000; }
+function validPass(target) { return target.enabled && !target.held && target.verdict === 'passed' && Date.now() - Date.parse(target.checked_at) < 900000; }
 function renderTargets() {
   const targets = Object.values(data.state.targets);
   const signature = JSON.stringify([targets, data.state.results.filter(r => r.verdict === 'running').map(r => r.model), data.state.config.daily_limit, targets.map(t => [dayCount(t.model), validPass(t), Date.parse(t.allow_until) > Date.now()])]);
@@ -171,20 +171,45 @@ function renderTargets() {
     const row = document.createElement('tr');
     const model = text('td', target.model, 'model-id');
     model.dataset.label = '模型';
+    const mode = document.createElement('select');
+    mode.setAttribute('aria-label', `检测策略 ${target.model}`);
+    for (const [value, label] of [['monitor', '检测＋告警'], ['strict', '严格模式：异常时拦截']]) {
+      const option = text('option', label);
+      option.value = value;
+      option.disabled = value === 'strict' && target.model.startsWith('group/');
+      mode.append(option);
+    }
+    mode.value = target.mode;
+    mode.onchange = async () => {
+      mode.disabled = true;
+      try {
+        await request('/api/action', { model: target.model, action: mode.value });
+        feedback('检测策略已更新', true); await refresh();
+      } catch (error) {
+        mode.value = target.mode; feedback(error.message);
+      } finally {
+        mode.disabled = false;
+      }
+    };
+    model.append(mode);
     const status = text('td', '');
     status.dataset.label = '状态';
     const allowed = Date.parse(target.allow_until) > Date.now();
-    const label = !target.enabled ? '监测关闭' : allowed ? '限时放行' : target.state === 'passed' && !validPass(target) ? '通过已过期' : names[target.state] || target.state;
-    status.append(text('span', label, 'state ' + (target.enabled ? target.state : '')));
+    const label = !target.enabled ? '监测关闭' : allowed ? '限时放行' : target.held ? '人工暂停' : target.state === 'passed' && !validPass(target) ? '待复检' : target.state === 'review' ? (target.mode === 'strict' ? '质量异常（已拦截）' : '质量异常（仅告警）') : names[target.state] || target.state;
+    const statusClass = !target.enabled ? '' : allowed ? 'passed' : target.held ? 'review' : target.state === 'passed' && !validPass(target) ? 'unverified' : target.state;
+    status.append(text('span', label, 'state ' + statusClass));
     if (target.reason) status.append(text('span', target.reason, 'cell-meta'));
+    if (target.state !== target.verdict && target.verdict !== 'unverified') {
+      status.append(text('span', `上次质量结论：${target.verdict === 'passed' ? '通过' : '复测未通过'}`, 'cell-meta'));
+    }
     const checked = text('td', dateTime(target.checked_at));
-    checked.dataset.label = '最近通过';
+    checked.dataset.label = '最近质量结论';
     const budget = text('td', `${dayCount(target.model)} / ${data.state.config.daily_limit}`, 'numeric');
     budget.dataset.label = '今日预算 (UTC)';
     const actions = text('td', '');
     actions.dataset.label = '操作';
     const tools = text('div', '', 'actions');
-    for (const [name, action, image] of [['重新检测', 'test', 'RefreshCw'], ['放行 15 分钟', 'allow', 'Clock3'], ['暂停', 'hold', 'Pause']]) {
+    for (const [name, action, image] of [['重新检测', 'test', 'RefreshCw'], ['放行 15 分钟', 'allow', 'Clock3'], target.held ? ['解除暂停', 'resume', 'Play'] : ['暂停', 'hold', 'Pause']]) {
       const button = text('button', '', 'icon-button');
       button.type = 'button'; button.append(icon(image));
       button.setAttribute('aria-label', `${name} ${target.model}`);
@@ -193,7 +218,7 @@ function renderTargets() {
       button.onclick = () => pending(button, async () => {
         if (action === 'test' && !requireGateway()) return;
         await request('/api/action', { model: target.model, action });
-        feedback(`${target.model}：${action === 'test' ? '已开始检测' : action === 'allow' ? '已放行 15 分钟' : '已暂停'}`, true);
+        feedback(`${target.model}：${action === 'test' ? '已开始检测' : action === 'allow' ? '已放行 15 分钟' : action === 'resume' ? '已解除暂停' : '已暂停'}`, true);
         await refresh();
       });
       tools.append(button);
@@ -282,7 +307,7 @@ async function refresh() {
     $('#targetCount').textContent = targets.length;
     $('#statEnabled').textContent = targets.filter(t => t.enabled).length;
     $('#statPassed').textContent = targets.filter(validPass).length;
-    $('#statReview').textContent = targets.filter(t => t.enabled && ['review', 'unavailable'].includes(t.state)).length;
+    $('#statReview').textContent = targets.filter(t => t.enabled && (t.held || t.verdict === 'review' || t.state === 'unavailable')).length;
     $('#statRequests').textContent = dayCount();
     syncSelect($('#model'), targets.map(t => [t.model, t.model + (t.enabled ? '' : '（监测关闭）')]));
     syncSelect($('#prompt'), data.prompts.map(p => [p.id, p.name]));

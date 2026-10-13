@@ -12,7 +12,7 @@ const dir=await fs.mkdtemp(path.join(os.tmpdir(),'quality-ui-'));
 const child=spawn(path.join(root,'bin/quality-check'),['-data',dir,'-gate',path.join(dir,'gate.js'),'-owned'],{stdio:['pipe','pipe','pipe']});
 let output='';
 const info=await new Promise((resolve,reject)=>{child.stdout.on('data',b=>{output+=b;const i=output.indexOf('\n');if(i>=0)resolve(JSON.parse(output.slice(0,i)))});child.once('error',reject)});
-const browser=await chromium.launch({headless:true});
+const browser=await chromium.launch({headless:true,executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE});
 let badFingerprint=false;
 let manualRun=0, truncated=false;
 let manualSVG;
@@ -41,6 +41,11 @@ try{
  await page.goto(info.url);await page.waitForSelector('#prompt option',{state:'attached'});
  assert.equal(await page.locator('#prompt option').count(),7);
  await page.locator('#target input').fill('fixture/solo');await page.locator('#target button').last().click();await page.waitForSelector('#targets tr');
+ assert.equal(await page.getByRole('combobox',{name:'检测策略 fixture/solo',exact:true}).inputValue(),'monitor');
+ await page.getByRole('combobox',{name:'检测策略 fixture/solo',exact:true}).selectOption('strict');
+ await page.waitForFunction(()=>document.querySelector('#message').textContent==='检测策略已更新');
+ await page.getByRole('combobox',{name:'检测策略 fixture/solo',exact:true}).selectOption('monitor');
+ await page.waitForFunction(()=>document.querySelector('#targets select').value==='monitor'&&!document.querySelector('#targets select').disabled);
  await page.locator('#tab-tests').click();
  await page.locator('#prompt').selectOption('repeat');assert.match(await page.locator('#promptText').textContent(),/StarSrvGroupBody/);
  await page.locator('#run').click();
@@ -52,6 +57,7 @@ try{
  assert.equal(await page.locator('#config input[name=gateway_key]').inputValue(),'');
  await page.keyboard.press('Escape');
  assert.equal(await page.locator('#settingsDialog').evaluate(el=>el.open),false);
+ await page.waitForFunction(()=>document.querySelector('#statPassed').textContent==='1',{},{timeout:15000});
  await page.locator('#run').click();
  assert.match(await page.locator('#testAnswer').textContent(),/等待/);
  await page.waitForFunction(()=>document.querySelector('#testAnswer').textContent.includes('回答 1'),{},{timeout:15000});
@@ -84,7 +90,7 @@ try{
  await page.waitForFunction(()=>document.querySelector('#traceResults').textContent.includes('最相似候选'),{},{timeout:15000});
  await page.locator('#traceResults summary').click();
  assert.equal(await page.locator('#traceResults tbody tr').count(),18);
- assert.match(await page.locator('#targets').textContent(),/未检测/);
+ assert.match(await page.locator('#targets').textContent(),/通过/);
  await page.waitForTimeout(3200);
  assert.equal(await page.locator('#traceResults details').evaluate(el=>el.open),true,'poll collapsed ranking');
  await page.locator('#traceRun').click();
@@ -97,13 +103,13 @@ try{
  await page.waitForFunction(()=>document.querySelector('#statPassed').textContent==='1',{},{timeout:15000});
  await page.locator('#tab-models').click();
  await page.getByRole('button',{name:'暂停 fixture/solo',exact:true}).click();
- await page.waitForFunction(()=>document.querySelector('#targets').textContent.includes('人工确认'));
+ await page.waitForFunction(()=>document.querySelector('#targets').textContent.includes('人工暂停'));
  badFingerprint=true;
  await page.locator('#tab-fingerprint').click();await page.locator('#traceBatch').selectOption('');
  await page.locator('#traceRun').click();
  await page.waitForFunction(()=>/本轮不作归因|本轮无法归因/.test(document.querySelector('#traceResults').textContent),{},{timeout:15000});
  assert.equal(await page.locator('#traceResults .trace-report').count(),0,'invalid output attributed');
- assert.match(await page.locator('#targets').textContent(),/人工确认/);
+ assert.match(await page.locator('#targets').textContent(),/人工暂停/);
  await page.locator('#traceBatch').selectOption(older);
  await page.locator('#tab-history').click();
  await page.waitForSelector('#results details');
@@ -174,6 +180,8 @@ try{
  assert.deepEqual(errors.filter(e=>!e.includes('502 (Bad Gateway)')),[]);console.log('PASS: configuration flow, seven prompts, two fingerprint batches, 18 candidates, preserved drafts/details, filters, keyboard, dark/light desktop and 320/390px mobile, transient 502 recovery');
  assert.equal(await page.locator('#message').textContent(),'','页面显示错误');
  await page.locator('#tab-models').click();
+ await page.getByRole('button',{name:'解除暂停 fixture/solo',exact:true}).click();
+ await page.waitForFunction(()=>!document.querySelector('#targets').textContent.includes('人工暂停'));
  await page.getByRole('checkbox',{name:'监测 fixture/solo',exact:true}).uncheck();
  await page.waitForFunction(()=>document.querySelector('#model').options[0]?.textContent.includes('监测关闭'));
  await page.locator('#tab-tests').click();await page.locator('#prompt').selectOption('svg');
@@ -225,6 +233,8 @@ try{
  assert.notEqual(await live.locator('body').evaluate(()=>window.started),start);
  for(const width of ['390','768','1280']){
   await page.locator('#htmlPreviewSize').selectOption(width);
+  const previewFrame=page.frames().find(frame=>frame.url().includes('/api/results/')&&frame.url().includes('/preview'));
+  await previewFrame.waitForFunction(expected=>innerWidth===expected,Number(width)-2,{timeout:5000});
   assert.equal(await live.locator('body').evaluate(()=>innerWidth),Number(width)-2);
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false,'fixed preview overflowed console');
  }
@@ -261,6 +271,9 @@ try{
  await page.locator('#target input').fill('fixture/readded');await page.locator('#target button').last().click();
  await page.waitForFunction(()=>document.querySelector('#model').value==='fixture/readded');
  assert.equal(await page.locator('#traceModel').inputValue(),'fixture/readded');
+ // The remaining scenarios exercise manual cancellation and history cleanup.
+ await page.getByRole('checkbox',{name:'监测 fixture/readded',exact:true}).uncheck();
+ await page.waitForFunction(()=>document.querySelector('#model').options[0]?.textContent.includes('监测关闭'));
  await page.locator('#tab-history').click();assert.ok(await page.locator('#results details').count()>0,'delete erased history');
  await page.locator('#tab-tests').click();await page.locator('#prompt').selectOption('repeat');
  await page.locator('#run').click();

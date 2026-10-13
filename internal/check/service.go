@@ -23,7 +23,10 @@ type Config struct {
 type Target struct {
 	Model      string    `json:"model"`
 	Enabled    bool      `json:"enabled"`
+	Mode       string    `json:"mode"`
+	Held       bool      `json:"held"`
 	State      string    `json:"state"`
+	Verdict    string    `json:"verdict"`
 	CheckedAt  time.Time `json:"checked_at"`
 	AllowUntil time.Time `json:"allow_until"`
 	RetryAfter time.Time `json:"retry_after"`
@@ -172,6 +175,22 @@ func New(dir, gate string) (*Service, error) {
 		return nil, err
 	}
 	for _, t := range s.state.Targets {
+		if t.Mode == "" {
+			t.Mode = "monitor"
+		}
+		// Older versions stored an operator hold as a failed quality check.
+		if t.Reason == "人工暂停" {
+			t.Held = true
+			t.State, t.Reason = "unverified", ""
+		}
+		if t.Verdict == "" {
+			t.Verdict = "unverified"
+			if t.State == "passed" || t.State == "review" {
+				t.Verdict = t.State
+			} else if !t.CheckedAt.IsZero() {
+				t.Verdict = "passed"
+			}
+		}
 		if t.State == "checking" {
 			t.State = "unavailable"
 			t.Reason = "检测服务重启，请重试"
@@ -189,7 +208,13 @@ func New(dir, gate string) (*Service, error) {
 	}
 	return s, nil
 }
-func (s *Service) Close() { s.cancel(); s.wg.Wait(); s.store.Close() }
+func (s *Service) Close() {
+	s.mu.Lock()
+	s.cancel()
+	s.mu.Unlock()
+	s.wg.Wait()
+	s.store.Close()
+}
 func AtomicWrite(name string, b []byte) error {
 	f, err := os.CreateTemp(filepath.Dir(name), ".quality-*")
 	if err != nil {
@@ -223,18 +248,18 @@ func (s *Service) saveLocked() error {
 	code := fmt.Sprintf(`const targets=%s;
 const alias=%s;
 export function onRequest(body,ctx){
- if(typeof body.model!=="string")return body;
+ if(typeof body.model!=="string"){return body;}
  const prefix="quality-probe/"+alias+"/";
  if(body.model.startsWith(prefix)){body.model=body.model.slice(prefix.length);return body;}
- const t=targets[body.model];if(!t||!t.enabled)return body;
+ const t=targets[body.model];if(!t||!t.enabled){return body;}
  const now=Date.now();
- if(Date.parse(t.allow_until)>now)return body;
- if(t.state==="passed"&&now-Date.parse(t.checked_at)<900000)return body;
- if(t.state!=="review"&&t.state!=="checking"&&!(Date.parse(t.retry_after)>now))console.log("MAGPIE_QUALITY_TRIGGER "+JSON.stringify({model:body.model}));
- const status=t.state==="review"?"需要人工确认":t.state==="checking"?"检测进行中，请稍后重试":"需要检测；自动触发依赖可用日志源，请查看检测控制台";
- return ctx.reject(403,"[MAGPIE_QUALITY_REVIEW_REQUIRED] "+status+"。本次请求未发往上游。目标："+body.model+"；原因："+(t.reason||"首次使用或检测已过期")+"；事件："+(t.event||"无")+"。请重新检测、限时放行或切换模型。");
+ if(Date.parse(t.allow_until)>now){return body;}
+ if(!t.held&&t.state!=="checking"&&now-Date.parse(t.checked_at)>=%d&&!(Date.parse(t.retry_after)>now)){console.log("MAGPIE_QUALITY_TRIGGER "+JSON.stringify({model:body.model}));}
+ if(!t.held&&!(t.mode==="strict"&&t.verdict==="review")){return body;}
+ const reason=t.held?"人工暂停":"严格模式：质量检测复测未通过";
+ return ctx.reject(403,"[MAGPIE_QUALITY_REVIEW_REQUIRED] "+reason+"。本次请求未发往上游。目标："+body.model+"；事件："+(t.event||"无")+"。请查看检测控制台、解除暂停或限时放行。");
 }
-`, b, a)
+`, b, a, checkInterval.Milliseconds())
 	if err := AtomicWrite(s.gate, []byte(code)); err != nil {
 		s.health = "门禁发布失败：" + err.Error()
 		return err
@@ -289,7 +314,7 @@ func (s *Service) SetTarget(model string, enabled bool) error {
 	defer s.mu.Unlock()
 	t := s.state.Targets[model]
 	if t == nil {
-		t = &Target{Model: model, State: "unverified"}
+		t = &Target{Model: model, Mode: "monitor", State: "unverified", Verdict: "unverified"}
 		s.state.Targets[model] = t
 	}
 	t.Enabled = enabled
@@ -304,11 +329,18 @@ func (s *Service) Action(model, action string) error {
 	}
 	switch action {
 	case "allow":
-		t.AllowUntil = time.Now().Add(15 * time.Minute)
+		t.AllowUntil = time.Now().Add(checkInterval)
 	case "hold":
 		t.AllowUntil = time.Time{}
-		t.State = "review"
-		t.Reason = "人工暂停"
+		t.Held = true
+	case "resume":
+		t.Held = false
+		t.AllowUntil = time.Time{}
+	case "monitor", "strict":
+		if action == "strict" && strings.HasPrefix(model, "group/") {
+			return errors.New("路由组仅支持检测与告警；严格模式请使用固定 provider/model")
+		}
+		t.Mode = action
 	case "disable":
 		t.Enabled = false
 	default:
@@ -319,6 +351,9 @@ func (s *Service) Action(model, action string) error {
 func (s *Service) Trigger(model, prompt string, manual bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.ctx.Err(); err != nil {
+		return err
+	}
 	t := s.state.Targets[model]
 	if t == nil {
 		return errors.New("模型未配置")
@@ -332,10 +367,7 @@ func (s *Service) Trigger(model, prompt string, manual bool) error {
 		}
 		return nil
 	}
-	if !manual && (t.State == "review" || t.AllowUntil.After(time.Now()) || t.State == "passed" && time.Since(t.CheckedAt) < 15*time.Minute) {
-		return nil
-	}
-	if !manual && t.RetryAfter.After(time.Now()) {
+	if !manual && !t.needsCheck(time.Now()) {
 		return nil
 	}
 	p, ok := FindPrompt(prompt)
@@ -354,16 +386,25 @@ func (s *Service) Trigger(model, prompt string, manual bool) error {
 		}
 	}
 	if count >= s.state.Config.DailyLimit {
+		if !manual {
+			t.State, t.Reason = "unavailable", "每日请求预算已耗尽"
+			now := time.Now().UTC()
+			t.RetryAfter = time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, time.UTC)
+			s.warnLocked(t)
+			if err := s.saveLocked(); err != nil {
+				return err
+			}
+		}
 		return errors.New("每日请求预算已耗尽")
 	}
-	previous := t.State
+	previous := *t
 	if p.Automatic {
 		t.State = "checking"
 		t.Reason = ""
 		t.Event = Secret()[:12]
 	}
 	if err := s.saveLocked(); err != nil {
-		t.State = previous
+		*t = previous
 		return err
 	}
 	s.running[model] = true
@@ -463,23 +504,21 @@ func (s *Service) run(ctx context.Context, model string, p Prompt) {
 		s.saveLocked()
 		return
 	}
-	// Manual hold during a run must not be overwritten by a passing probe.
-	if t.State != "checking" {
-		s.saveLocked()
-		return
-	}
 	if verdict == "manual" {
 		t.State = "unavailable"
 	} else {
 		t.State = verdict
 	}
 	t.Reason = reason
-	if verdict == "passed" {
+	if verdict == "passed" || verdict == "review" {
+		t.Verdict = verdict
 		t.CheckedAt = time.Now()
-		t.Reason = ""
 		t.RetryAfter = time.Time{}
 	} else if verdict == "unavailable" {
-		t.RetryAfter = time.Now().Add(15 * time.Minute)
+		t.RetryAfter = time.Now().Add(checkInterval)
+	}
+	if verdict != "passed" {
+		s.warnLocked(t)
 	}
 	s.saveLocked()
 }

@@ -41,7 +41,7 @@ func TestGateAndPersistence(t *testing.T) {
 	if e := s.store.Load(&restored); e != nil {
 		t.Fatal(e)
 	}
-	if restored.Targets["a/solo"].State != "review" {
+	if !restored.Targets["a/solo"].Held {
 		t.Fatal("hold lost")
 	}
 	if state.Alias != "" || state.Config.GatewayKey != "" {

@@ -38,14 +38,14 @@
     <button id="tab-history" role="tab" aria-selected="false" aria-controls="view-history" tabindex="-1" data-view="history"><i data-icon="History"></i>检测记录</button>
   </nav>
   <section id="view-models" class="view" role="tabpanel" aria-labelledby="tab-models">
-    <div class="section-heading"><h2>主力模型</h2><span class="meta">通过结果有效期 15 分钟</span></div>
+    <div class="section-heading"><h2>主力模型</h2><span class="meta">默认检测＋告警，每 15 分钟后台复检</span></div>
     <form id="target" class="add-target">
       <label class="grow"><span class="sr-only">完整模型 ID</span><input name="model" list="catalog" aria-label="完整模型 ID" placeholder="provider/model" required autocomplete="off"><datalist id="catalog"></datalist></label>
       <button type="button" id="loadModels" class="secondary"><i data-icon="RefreshCw"></i><span>刷新模型</span></button>
       <button class="primary"><i data-icon="Plus"></i><span>添加监测目标</span></button>
     </form>
     <div class="table-wrap">
-      <table class="targets-table"><thead><tr><th>模型</th><th>状态</th><th>最近通过</th><th>今日预算</th><th class="align-right">操作</th></tr></thead><tbody id="targets"></tbody></table>
+      <table class="targets-table"><thead><tr><th>模型</th><th>状态</th><th>最近质量结论</th><th>今日预算</th><th class="align-right">操作</th></tr></thead><tbody id="targets"></tbody></table>
     </div>
   </section>
   <section id="view-tests" class="view" role="tabpanel" aria-labelledby="tab-tests" hidden>
@@ -107,7 +107,7 @@
       <label>Magpie 网关 URL<input name="gateway_url" type="url" placeholder="http://127.0.0.1:3425" required autocomplete="off"></label>
       <label>网关 Key<span class="secret-field"><input name="gateway_key" autocomplete="off" placeholder="本机默认：magpie"><button type="button" id="showKey" class="icon-button" data-icon="Eye" aria-label="显示输入的 Key" data-tooltip="显示输入的 Key"></button></span></label>
       <p id="keyState" class="field-note"></p>
-      <label>Magpie 日志绝对路径<input name="log_path" placeholder="/srv/magpie/gateway.log" autocomplete="off"></label>
+      <label>Magpie 日志绝对路径（可选）<input name="log_path" placeholder="/srv/magpie/gateway.log" autocomplete="off"></label>
       <p id="logHealth" class="field-note"></p>
       <label>每日每模型请求上限<input name="daily_limit" type="number" min="1" max="10000" value="120" required></label>
     </div>

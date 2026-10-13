@@ -25,7 +25,7 @@ function start(options = {}) {
     let output = '';
     const timer = setTimeout(() => { child.kill(); reject(new Error('质量检测后台启动超时')); }, 15000);
     child.stdout.on('data', b => { output += b; const i = output.indexOf('\n'); if (i >= 0) { try { const v = JSON.parse(output.slice(0, i)); clearTimeout(timer); resolve(v); } catch { reject(new Error('后台启动信息无效')); } } });
-    child.stderr.on('data', () => {});
+    child.stderr.on('data', b => { console.warn(b.toString().trimEnd()); });
     child.once('error', e => { clearTimeout(timer); ready = undefined; reject(new Error(`无法启动 Go 后台，请先构建二进制：${e.message}`)); });
     child.once('exit', () => { clearTimeout(timer); stopDiscovery?.(); stopDiscovery = undefined; ready = undefined; reject(new Error('检测后台已退出')); });
   });

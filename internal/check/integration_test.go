@@ -127,7 +127,7 @@ func TestFailureAndManualState(t *testing.T) {
 	}
 	waitIdle(t, s)
 	state, _ := s.Snapshot()
-	if state.Targets["a/solo"].State != "review" {
+	if !state.Targets["a/solo"].Held {
 		t.Fatal("手动作品题覆盖门禁状态")
 	}
 }

@@ -54,7 +54,7 @@ func TestClearHistoryPreservesBudgetAndGate(t *testing.T) {
 		t.Fatal(err)
 	}
 	state, _ := s.Snapshot()
-	if len(state.Results) != 0 || state.Targets["a/solo"].State != "review" {
+	if len(state.Results) != 0 || !state.Targets["a/solo"].Held {
 		t.Fatal(state)
 	}
 	if err := s.Trigger("a/solo", "repeat", true); err == nil || !strings.Contains(err.Error(), "预算") {
@@ -112,7 +112,7 @@ func TestReviewPersistsWithoutChangingVerdictOrGate(t *testing.T) {
 	if r.Answer != "original" || r.Verdict != "manual" || r.Review != "accepted" || r.ReviewNote != "checked" || r.ReviewedAt.IsZero() {
 		t.Fatal(r)
 	}
-	if stored.Targets["a/solo"].State != "review" {
+	if !stored.Targets["a/solo"].Held {
 		t.Fatal("human review changed gate")
 	}
 	if s.ReviewResult("answer", "passed", "") == nil || s.ReviewResult("missing", "pending", "") == nil {

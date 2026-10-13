@@ -84,11 +84,11 @@ func (s *Service) ManagedHandler(access *Access, console *Console) http.Handler 
 		lastActivity := s.lastActivity
 		gatewayConfigured := s.state.Config.GatewayURL != "" && s.state.Config.GatewayKey != ""
 		s.mu.Unlock()
-		logHealth := "未配置日志源：自动触发不可用"
+		logHealth := "未配置日志源：后台仍会定时检测"
 		if state.Config.LogPath != "" {
 			f, err := os.Open(state.Config.LogPath)
 			if err != nil {
-				logHealth = "日志源不可读：自动触发不可用"
+				logHealth = "日志源不可读：后台仍会定时检测"
 			} else {
 				f.Close()
 				logHealth = "日志源可读"
